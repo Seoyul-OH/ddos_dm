@@ -14,7 +14,8 @@ They can be downloaded at https://github.com/jafingerhut/p4-guide
     git clone https://github.com/Seoyul-OH/ddos_dm.git
     ```
 
-2. ```
+2. Go to folder
+   ```
     cd ddos_dm
    ```
 
@@ -42,7 +43,7 @@ Open a different terminal and then,
 sudo python3 cm-sketch-controller.py --option "set_hashes"
 ```
 
-7. Send packets (Arguments are in sourceIP, destinationIP, interface)
+7. Send packets (Arguments are in "sourceIP, destinationIP, interface" order)
 ```
 sudo python3 send_1.py 10.0.2.2 10.0.1.1 veth1
 ```
