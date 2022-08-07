@@ -2,7 +2,7 @@
 #include <v1model.p4>
 
 #define MAX_DDoS_SIZE 131072
-#define DDoS_threshold 5
+#define DDoS_threshold 2
 
 header ethernet_t {
     bit<48> dstAddr;
@@ -51,8 +51,16 @@ struct metadata {
     bit<1> res2; 
     bit<1> res3;
     bit<32> count_min;
+    
     bit<1> digest;
     bit<32> victimdstip;
+
+    bit<32> pkt_num;
+    bit<32> current_round;
+
+    bit<32> round_in_cms1;
+    bit<32> round_in_cms2;
+    bit<32> round_in_cms3;
 }
 
 struct headers {
@@ -99,32 +107,42 @@ register<bit<32>>(1024) occSlots1;
 register<bit<32>>(1024) occSlots2;
 register<bit<32>>(1024) occSlots3;
 
-register<bit<1>>(MAX_DDoS_SIZE) cms1_0;
-register<bit<1>>(MAX_DDoS_SIZE) cms1_1;
-register<bit<1>>(MAX_DDoS_SIZE) cms1_2;
-register<bit<1>>(MAX_DDoS_SIZE) cms1_3;
-register<bit<1>>(MAX_DDoS_SIZE) cms1_4;
-register<bit<1>>(MAX_DDoS_SIZE) cms1_5;
-register<bit<1>>(MAX_DDoS_SIZE) cms1_6;
-register<bit<1>>(MAX_DDoS_SIZE) cms1_7;
+register<bit<32>>(1024) occSlots1_round;
+register<bit<32>>(1024) occSlots2_round;
+register<bit<32>>(1024) occSlots3_round;
 
-register<bit<1>>(MAX_DDoS_SIZE) cms2_0;
-register<bit<1>>(MAX_DDoS_SIZE) cms2_1;
-register<bit<1>>(MAX_DDoS_SIZE) cms2_2;
-register<bit<1>>(MAX_DDoS_SIZE) cms2_3;
-register<bit<1>>(MAX_DDoS_SIZE) cms2_4;
-register<bit<1>>(MAX_DDoS_SIZE) cms2_5;
-register<bit<1>>(MAX_DDoS_SIZE) cms2_6;
-register<bit<1>>(MAX_DDoS_SIZE) cms2_7;
+register<bit<32>>(MAX_DDoS_SIZE) cms1_0;
+register<bit<32>>(MAX_DDoS_SIZE) cms1_1;
+register<bit<32>>(MAX_DDoS_SIZE) cms1_2;
+register<bit<32>>(MAX_DDoS_SIZE) cms1_3;
+register<bit<32>>(MAX_DDoS_SIZE) cms1_4;
+register<bit<32>>(MAX_DDoS_SIZE) cms1_5;
+register<bit<32>>(MAX_DDoS_SIZE) cms1_6;
+register<bit<32>>(MAX_DDoS_SIZE) cms1_7;
 
-register<bit<1>>(MAX_DDoS_SIZE) cms3_0;
-register<bit<1>>(MAX_DDoS_SIZE) cms3_1;
-register<bit<1>>(MAX_DDoS_SIZE) cms3_2;
-register<bit<1>>(MAX_DDoS_SIZE) cms3_3;
-register<bit<1>>(MAX_DDoS_SIZE) cms3_4;
-register<bit<1>>(MAX_DDoS_SIZE) cms3_5;
-register<bit<1>>(MAX_DDoS_SIZE) cms3_6;
-register<bit<1>>(MAX_DDoS_SIZE) cms3_7;
+register<bit<32>>(MAX_DDoS_SIZE) cms2_0;
+register<bit<32>>(MAX_DDoS_SIZE) cms2_1;
+register<bit<32>>(MAX_DDoS_SIZE) cms2_2;
+register<bit<32>>(MAX_DDoS_SIZE) cms2_3;
+register<bit<32>>(MAX_DDoS_SIZE) cms2_4;
+register<bit<32>>(MAX_DDoS_SIZE) cms2_5;
+register<bit<32>>(MAX_DDoS_SIZE) cms2_6;
+register<bit<32>>(MAX_DDoS_SIZE) cms2_7;
+
+register<bit<32>>(MAX_DDoS_SIZE) cms3_0;
+register<bit<32>>(MAX_DDoS_SIZE) cms3_1;
+register<bit<32>>(MAX_DDoS_SIZE) cms3_2;
+register<bit<32>>(MAX_DDoS_SIZE) cms3_3;
+register<bit<32>>(MAX_DDoS_SIZE) cms3_4;
+register<bit<32>>(MAX_DDoS_SIZE) cms3_5;
+register<bit<32>>(MAX_DDoS_SIZE) cms3_6;
+register<bit<32>>(MAX_DDoS_SIZE) cms3_7;
+
+register<bit<32>>(1) round;
+register<bit<32>>(1) pkt_counter;
+
+
+
 control ingress(inout headers hdr, inout metadata meta, inout standard_metadata_t standard_metadata) {
     action ipv4_forward(bit<48> dstAddr, bit<9> port) {
         standard_metadata.egress_spec = port;
@@ -151,46 +169,35 @@ control ingress(inout headers hdr, inout metadata meta, inout standard_metadata_
         bit<10> hash_32_1;
         bit<10> hash_32_2;
         bit<10> hash_32_3;
+
         // Index in Bitmap (Size 1024)
         bit<10> bm_hash;
+
         // Index in BACON Sketch (Size 1024 * 1024)
         bit<32> index1 = 32w0;
         bit<32> index2 = 32w0;
         bit<32> index3 = 32w0;
-        // Values in BACON Sketch (0 or 1)
-        //bit<1> res1 = 1w0;
-        //bit<1> res2 = 1w0;
-        //bit<1> res3 = 1w0;
-        // Number of 1s in BACON Sketch
+
         bit<32> value_1 = 32w0;
         bit<32> value_2 = 32w0;
         bit<32> value_3 =32w0;
+
+        bit<32> round_1 = 32w0;
+        bit<32> round_2 = 32w0;
+        bit<32> round_3 =32w0;
 
         // Difference between values
         bit<32> d12;
         bit<32> d13;
         bit<32> d23;
 
-        // Digest
-        // 0: No report
-        // 1: Report hdr.ipv4.dstAddr to controller
-        //bit<1> digest_type;
-
-    /* Stage 0 */
         ipv4_lpm.apply();
         
-
-    /* Stage 1 */
-        //crc32_custom: 
-        // Please refer to the paper how to customize CRC32
         hash(hash_32_1, HashAlgorithm.crc32, 1w0, {hdr.ipv4.dstAddr}, 10w1023);
         hash(hash_32_2, HashAlgorithm.crc32_custom, 1w0, {hdr.ipv4.dstAddr}, 10w1023);
-
-    /* Stage 2 */
         hash(hash_32_3, HashAlgorithm.crc32_custom, 1w0, {hdr.ipv4.dstAddr}, 10w1023);
         hash(bm_hash, HashAlgorithm.crc32, 1w0, {hdr.ipv4.srcAddr}, 10w1023);
         
-    /* Stage 3 */
         index1[9:0] = bm_hash;
         index2[9:0] = bm_hash;
         index3[9:0] = bm_hash;
@@ -200,186 +207,291 @@ control ingress(inout headers hdr, inout metadata meta, inout standard_metadata_
         index3[16:10] = hash_32_3[6:0];
 
 
-    /* Stage 4 */
-        if(hash_32_1[9:7] == 0){
-             cms1_0.read(meta.res1, index1);
-             if(meta.res1==0){
-             cms1_0.write(index1, 1);
-             meta.res1=1;
-             }
+        //packet count, round count 
+        pkt_counter.read(meta.pkt_num, 0);
+        meta.pkt_num = meta.pkt_num + 1;
+        round.read(meta.current_round,0);
+
+        if (meta.pkt_num == 1) {
+            meta.current_round = meta.current_round + 1;
+            round.write(0, meta.current_round);
+            pkt_counter.write(0, meta.pkt_num);
+        }
+        else if(meta.pkt_num == 5){//number of packets in one round is 5, reset
+            pkt_counter.write(0,0);
+        }
+        else { 
+            pkt_counter.write(0, meta.pkt_num);
+        }
+
+        //hash1
+        if(hash_32_1[9:7] == 0){//if round_in_cms is 0, it is automatically different from current_round which starts from 1
+            cms1_0.read(meta.round_in_cms1, index1);
+            if(meta.round_in_cms1 != meta.current_round){ 
+            cms1_0.write(index1, meta.current_round);
+            meta.res1=1;
+            }
+            else{
+                meta.res1=0;
+            }
         }else if(hash_32_1[9:7] == 1){
-             cms1_1.read(meta.res1, index1);
-             if(meta.res1==0){
-             cms1_1.write(index1, 1);
-             meta.res1=1;
-             }
+            cms1_1.read(meta.round_in_cms1, index1);
+            if(meta.round_in_cms1 != meta.current_round){ 
+            cms1_1.write(index1, meta.current_round);
+            meta.res1=1;
+            }
+            else{
+                meta.res1=0;
+            }
         }else if(hash_32_1[9:7] == 2){
-             cms1_2.read(meta.res1, index1);
-             if(meta.res1==0){
-             cms1_2.write(index1, 1);
-             meta.res1=1;
+            cms1_2.read(meta.round_in_cms1, index1);
+            if(meta.round_in_cms1 != meta.current_round){ 
+            cms1_2.write(index1, meta.current_round);
+            meta.res1=1;
+             }
+             else{
+                meta.res1=0;
              }
         }else if(hash_32_1[9:7] == 3){
-             cms1_3.read(meta.res1, index1);
-             if(meta.res1==0){
-             cms1_3.write(index1, 1);
-             meta.res1=1;
+             cms1_3.read(meta.round_in_cms1, index1);
+            if(meta.round_in_cms1 != meta.current_round){ 
+            cms1_3.write(index1, meta.current_round);
+            meta.res1=1;
              }
-        }
-    /* Stage 5 */
-        else if(hash_32_1[9:7] == 4){
-             cms1_4.read(meta.res1, index1);
-             if(meta.res1==0){
-             cms1_4.write(index1, 1);
-             meta.res1=1;
+             else{
+                meta.res1=0;
              }
+        }else if(hash_32_1[9:7] == 4){
+            cms1_4.read(meta.round_in_cms1, index1);
+            if(meta.round_in_cms1 != meta.current_round){ 
+            cms1_4.write(index1, meta.current_round);
+            meta.res1=1;
+            }
+            else{
+                meta.res1=0;
+            }    
         }else if(hash_32_1[9:7] == 5){
-             cms1_5.read(meta.res1, index1);
-             if(meta.res1==0){
-             cms1_5.write(index1, 1);
-             meta.res1=1;
-             }
+            cms1_5.read(meta.round_in_cms1, index1);
+            if(meta.round_in_cms1 != meta.current_round){ 
+            cms1_5.write(index1, meta.current_round);
+            meta.res1=1;
+            }
+            else{
+                meta.res1=0;
+            }
         }else if(hash_32_1[9:7] == 6){
-             cms1_6.read(meta.res1, index1);
-             if(meta.res1==0){
-             cms1_6.write(index1, 1);
-             meta.res1=1;
-             }
+            cms1_6.read(meta.round_in_cms1, index1);
+            if(meta.round_in_cms1 != meta.current_round){ 
+            cms1_6.write(index1, meta.current_round);
+            meta.res1=1;
+            }
+            else{
+                meta.res1=0;
+            }
         }else if(hash_32_1[9:7] == 7){
-             cms1_7.read(meta.res1, index1);
-             if(meta.res1==0){
-             cms1_7.write(index1, 1);
-             meta.res1=1;
-             }
+            cms1_7.read(meta.round_in_cms1, index1);
+            if(meta.round_in_cms1 != meta.current_round){ 
+            cms1_7.write(index1, meta.current_round);
+            meta.res1=1;
+            }
+            else{
+                meta.res1=0;
+            }
         }
 
-    /* Stage 6 */
+        //hash2
         if(hash_32_2[9:7] == 0){
-             cms2_0.read(meta.res2, index2);
-             if(meta.res2==0){
-             cms2_0.write(index2, 1);
-             meta.res2=1;
-             }
+            cms2_0.read(meta.round_in_cms2, index2);
+            if(meta.round_in_cms2 != meta.current_round){ 
+            cms2_0.write(index2, meta.current_round);
+            meta.res2=1;
+            }
+            else{
+                meta.res2=0;
+            }
         }else if(hash_32_2[9:7] == 1){
-             cms2_1.read(meta.res2, index2);
-             if(meta.res2==0){
-             cms2_1.write(index2, 1);
-             meta.res2=1;
-             }
+            cms2_1.read(meta.round_in_cms2, index2);
+            if(meta.round_in_cms2 != meta.current_round){ 
+            cms2_1.write(index2, meta.current_round);
+            meta.res2=1;
+            }
+            else{
+                meta.res2=0;
+            }
         }else if(hash_32_2[9:7] == 2){
-             cms2_2.read(meta.res2, index2);
-             if(meta.res2==0){
-             cms2_2.write(index2, 1);
-             meta.res2=1;
-             }
+            cms2_2.read(meta.round_in_cms2, index2);
+            if(meta.round_in_cms2 != meta.current_round){ 
+            cms2_2.write(index2, meta.current_round);
+            meta.res2=1;
+            }
+            else{
+                meta.res2=0;
+            }
         }else if(hash_32_2[9:7] == 3){
-             cms2_3.read(meta.res2, index2);
-             if(meta.res2==0){
-             cms2_3.write(index2, 1);
-             meta.res2=1;
-             }
+            cms2_3.read(meta.round_in_cms2, index2);
+            if(meta.round_in_cms2 != meta.current_round){ 
+            cms2_3.write(index2, meta.current_round);
+            meta.res2=1;
+            }
+            else{
+                meta.res2=0;
+            }
         }
-    /* Stage 7 */
         else if(hash_32_2[9:7] == 4){
-             cms2_4.read(meta.res2, index2);
-             if(meta.res2==0){
-             cms2_4.write(index2, 1);
-             meta.res2=1;
-             }
+            cms2_4.read(meta.round_in_cms2, index2);
+            if(meta.round_in_cms2 != meta.current_round){ 
+            cms2_4.write(index2, meta.current_round);
+            meta.res2=1;
+            }
+            else{
+                meta.res2=0;
+            }
         }else if(hash_32_2[9:7] == 5){
-             cms2_5.read(meta.res2, index2);
-             if(meta.res2==0){
-             cms2_5.write(index2, 1);
-             meta.res2=1;
-             }
+            cms2_5.read(meta.round_in_cms2, index2);
+            if(meta.round_in_cms2 != meta.current_round){ 
+            cms2_5.write(index2, meta.current_round);
+            meta.res2=1;
+            }
+            else{
+                meta.res2=0;
+            }
         }else if(hash_32_2[9:7] == 6){
-             cms2_6.read(meta.res2, index2);
-             if(meta.res2==0){
-             cms2_6.write(index2, 1);
-             meta.res2=1;
-             }
+            cms2_6.read(meta.round_in_cms2, index2);
+            if(meta.round_in_cms2 != meta.current_round){ 
+            cms2_6.write(index2, meta.current_round);
+            meta.res2=1;
+            }
+            else{
+                meta.res2=0;
+            }
         }else if(hash_32_2[9:7] == 7){
-             cms2_7.read(meta.res2, index2);
-             if(meta.res2==0){
-             cms2_7.write(index2, 1);
-             meta.res2=1;
-             }
+            cms2_7.read(meta.round_in_cms2, index2);
+            if(meta.round_in_cms2 != meta.current_round){ 
+            cms2_7.write(index2, meta.current_round);
+            meta.res2=1;
+            }
+            else{
+                meta.res2=0;
+            }
         }
 
-    
-    /* Stage 8 */
+        //hash3
         if(hash_32_3[9:7] == 0){
-             cms3_0.read(meta.res3, index3);
-             if(meta.res3==0){
-             cms3_0.write(index3, 1);
-             meta.res3=1;
-             }
+            cms3_0.read(meta.round_in_cms3, index3);
+            if(meta.round_in_cms3 != meta.current_round){ 
+            cms3_0.write(index3, meta.current_round);
+            meta.res3=1;
+            }
+            else{
+                meta.res3=0;
+            }
         }else if(hash_32_3[9:7] == 1){
-             cms3_1.read(meta.res3, index3);
-             if(meta.res3==0){
-             cms3_1.write(index3, 1);
-             meta.res3=1;
-             }
+            cms3_1.read(meta.round_in_cms3, index3);
+            if(meta.round_in_cms3 != meta.current_round){ 
+            cms3_1.write(index3, meta.current_round);
+            meta.res3=1;
+            }
+            else{
+                meta.res3=0;
+            }
         }else if(hash_32_3[9:7] == 2){
-             cms3_2.read(meta.res3, index3);
-             if(meta.res3==0){
-             cms3_2.write(index3, 1);
-             meta.res3=1;
-             }
+            cms3_2.read(meta.round_in_cms3, index3);
+            if(meta.round_in_cms3 != meta.current_round){ 
+            cms3_2.write(index3, meta.current_round);
+            meta.res3=1;
+            }
+            else{
+                meta.res3=0;
+            }
         }else if(hash_32_3[9:7] == 3){
-             cms3_3.read(meta.res3, index3);
-             if(meta.res3==0){
-             cms3_3.write(index3, 1);
-             meta.res3=1;
-             }
+            cms3_3.read(meta.round_in_cms3, index3);
+            if(meta.round_in_cms3 != meta.current_round){ 
+            cms3_3.write(index3, meta.current_round);
+            meta.res3=1;
+            }
+            else{
+                meta.res3=0;
+            }
         }
-    /* Stage 9 */
         else if(hash_32_3[9:7] == 4){
-             cms3_4.read(meta.res3, index3);
-             if(meta.res3==0){
-             cms3_4.write(index3, 1);
-             meta.res3=1;
-             }
+            cms3_4.read(meta.round_in_cms3, index3);
+            if(meta.round_in_cms3 != meta.current_round){ 
+            cms3_4.write(index3, meta.current_round);
+            meta.res3=1;
+            }
+            else{
+                meta.res3=0;
+            }
         }else if(hash_32_3[9:7] == 5){
-             cms3_5.read(meta.res3, index3);
-             if(meta.res3==0){
-             cms3_5.write(index3, 1);
-             meta.res3=1;
-             }
+            cms3_5.read(meta.round_in_cms3, index3);
+            if(meta.round_in_cms3 != meta.current_round){ 
+            cms3_5.write(index3, meta.current_round);
+            meta.res3=1;
+            }
+            else{
+                meta.res3=0;
+            }
         }else if(hash_32_3[9:7] == 6){
-             cms3_6.read(meta.res3, index3);
-             if(meta.res3==0){
-             cms3_6.write(index3, 1);
-             meta.res3=1;
-             }
+            cms3_6.read(meta.round_in_cms3, index3);
+            if(meta.round_in_cms3 != meta.current_round){ 
+            cms3_6.write(index3, meta.current_round);
+            meta.res3=1;
+            }
+            else{
+                meta.res3=0;
+            }
         }else if(hash_32_3[9:7] == 7){
-             cms3_7.read(meta.res3, index3);
-             if(meta.res3==0){
-             cms3_7.write(index3, 1);
-             meta.res3=1;
-             }
+            cms3_7.read(meta.round_in_cms3, index3);
+            if(meta.round_in_cms3 != meta.current_round){ 
+            cms3_7.write(index3, meta.current_round);
+            meta.res3=1;
+            }
+            else{
+                meta.res3=0;
+            }
         }
-    /* Stage 10*/
+
+        //count the number of 1s
         occSlots1.read(value_1, (bit<32>)hash_32_1);
-        if(meta.res1 == 1){
+        occSlots1_round.read(round_1,(bit<32>)hash_32_1);
+        if(meta.res1 == 1 && round_1 == meta.current_round){
             value_1 = value_1 + 1;
+            occSlots1.write((bit<32>)hash_32_1, value_1);
+        }
+        else if(meta.res1 == 1 && round_1 != meta.current_round){
+            round_1 = meta.current_round;
+            occSlots1_round.write((bit<32>)hash_32_1, round_1);
+            value_1 = 1;
             occSlots1.write((bit<32>)hash_32_1, value_1);
         }
 
         occSlots2.read(value_2, (bit<32>)hash_32_2);
-        if(meta.res2 == 1){
+        occSlots2_round.read(round_2,(bit<32>)hash_32_2);
+        if(meta.res2 == 1 && round_2 == meta.current_round){
             value_2 = value_2 + 1;
+            occSlots2.write((bit<32>)hash_32_2, value_2);
+        }
+        else if(meta.res2 == 1 && round_2 != meta.current_round){
+            round_2 = meta.current_round;
+            occSlots2_round.write((bit<32>)hash_32_2, round_2);
+            value_2 = 1;
             occSlots2.write((bit<32>)hash_32_2, value_2);
         }
 
         occSlots3.read(value_3, (bit<32>)hash_32_3);
-        if(meta.res3 == 1){
+        occSlots3_round.read(round_3,(bit<32>)hash_32_3);
+        if(meta.res3 == 1 && round_3 == meta.current_round){
             value_3 = value_3 + 1;
             occSlots3.write((bit<32>)hash_32_3, value_3);
         }
+        else if(meta.res3 == 1 && round_3 != meta.current_round){
+            round_3 = meta.current_round;
+            occSlots3_round.write((bit<32>)hash_32_3, round_3);
+            value_3 = 1;
+            occSlots3.write((bit<32>)hash_32_3, value_3);
+        }
 
-
-    /* Stage 11 */
+        //find the minimum of 1-counts
         d12 = value_1 - value_2;
         d13 = value_1 - value_3;
         d23 = value_2 - value_3;
