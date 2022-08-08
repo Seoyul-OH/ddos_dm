@@ -3,6 +3,7 @@
 
 #define MAX_DDoS_SIZE 131072
 #define DDoS_threshold 2
+#define DROP_PERCENT 30
 
 header ethernet_t {
     bit<48> dstAddr;
@@ -61,6 +62,43 @@ struct metadata {
     bit<32> round_in_cms1;
     bit<32> round_in_cms2;
     bit<32> round_in_cms3;
+
+    bit<8> key; /* Key for share alarm packet - session ID */
+    bit<8> key_write_ip;
+    bit<8> key_write_ip_notif;
+    bit<8> mirror_session_id; /* Mirror session */
+
+    bit<32> sl_source;/* IP source address to verify in Suspect List*/
+    bit<32> sl_dst;
+    bit<32> sl_ind; /* Suspect List index when read*/
+    bit<32> sl_read; /* IP address readed from Suspect List*/
+    bit<32> il_read; /* IP address readed from Inspection List*/
+    bit<32> sl_address; /* Address to include into Suspect List */
+    bit<32> sl_index; /* Suspect List index when write*/
+    bit<1> features; /* Indicates switch features */
+
+    bit<48> timestamp; /* Ingress timestamp to generate hash and filtering malicious traffic */
+    bit<48> timestamp_hashed; /* Hash of timestamp for filtering */
+    
+    bit<32> hhd_dst_carried; /* Key packet */
+    bit<32> hhd_src_carried; /* Key packet */
+    bit<32> hhd_count_carried; /* Counter for packet key */
+    bit<32> hhd_index; /* Table slot based on hash function */
+
+    bit<32> hhd_src_table; /* IP address in table */
+    bit<32> hhd_count_table; /* Counter value in table */
+
+    bit<32> hhd_src_swap; /* Swap key carried and key in table */
+    bit<32> hhd_count_swap; /* Swap counter carried and table */
+
+    bit<32> hhd_swapped; /* Indicator if IP was swapped in previous stage */
+    //bit<32> hhd_thresh; /* Heavy Hitter Threshold */
+
+    bit<32> hhd_index_total; /* Position of Heavy Hitter global register */
+    bit<32> hhd_aux_index_total; /* Position of Heavy Hitter global register when alarm detected */
+    bit<32> hhd_write_key; /* Key readed from Heavy Hitter global register for write in alarm packet */
+
+    bit<32> suspectadd_index;
 }
 
 struct headers {
@@ -511,24 +549,267 @@ control ingress(inout headers hdr, inout metadata meta, inout standard_metadata_
 }
 
 control egress(inout headers hdr, inout metadata meta, inout standard_metadata_t standard_metadata) {
-    @name(".rewrite_mac") action rewrite_mac(bit<48> smac) {
-        hdr.ethernet.srcAddr = smac;
-    }
-    @name("._drop") action _drop() {
+    action drop() {
         mark_to_drop(standard_metadata);
     }
-    @name(".send_frame") table send_frame {
-        actions = {
-            rewrite_mac;
-            _drop;
+
+    action set_session(bit<8> session_id) {
+        meta.mirror_session_id = session_id;
+    }
+
+    table share_alarm {
+        key = {
+            meta.key: exact;
         }
+        actions = {
+            set_session;
+        }
+        default_action = set_session(0);
+    }
+
+    table share_notification {
+        key = {
+            meta.key: exact;
+        }
+        actions = {
+            set_session;
+        }
+        default_action = set_session(0);
+    }
+
+    action rewrite_mac (bit<48> smac){
+        hdr.ethernet.srcAddr = smac;
+    }
+
+    table send_frame {
         key = {
             standard_metadata.egress_port: exact;
         }
-        size = 256;
+        actions = {
+            rewrite_mac;
+            drop;
+        }
+        default_action = drop();
     }
-    apply {
-        send_frame.apply();
+
+    action write_srcip_addr (bit<32> srcAddr) {
+        hdr.ipv4.srcAddr = srcAddr;
+    }
+    action write_dstip_addr (bit<32> dstAddr) {
+        hdr.ipv4.dstAddr = dstAddr;
+    }
+
+    table write_ip {
+        key = {
+            meta.key_write_ip: exact;
+        }
+        actions = {
+            write_srcip_addr;
+            write_dstip_addr;
+            drop;
+        }
+        default_action = drop();
+    }
+
+    register<bit<32>>(1024) suspectlist; // (HHD) Register with IP Address to blocking
+    register<bit<32>>(1024) inspectionlist; // HHD Register with IP Address received into Alarm PacketIn
+    register<bit<1>>(1) features; //Register indicates features of switch (1: FlowStatistics/Suspect Identificaction) ?? first, 0
+
+    register<bit<32>>(1024) src_1;
+    register<bit<32>>(1024) count_1;
+    register<bit<32>>(1024) src_2;
+    register<bit<32>>(1024) count_2;
+    register<bit<32>>(1024) src_3;
+    register<bit<32>>(1024) count_3;
+
+    register<bit<32>>(8128) key_total;//TOP
+    register<bit<32>>(1) index_total;
+
+    apply{
+        write_ip.apply();
+        share_alarm.apply();
+        share_notification.apply();
+
+
+        //start
+        meta.sl_source = hdr.ipv4.srcAddr;
+        hash(meta.sl_ind, HashAlgorithm.crc32, 1w0, {meta.sl_source}, 10w1023);//source IP location in suspect list, for the front switches. 
+        suspectlist.read(meta.sl_read,meta.sl_ind);
+        inspectionlist.read(meta.il_read,meta.sl_ind);
+        features.read(meta.features,0);
+
+        index_total.read(meta.hhd_index_total,0);
+
+        if(meta.sl_source == meta.sl_read){//incoming packet's src is in suspect list 
+            hash(meta.timestamp_hashed, HashAlgorithm.crc16, 32w0, {meta.timestamp}, 32w64); /*This generates a number between 0-100 based on packet timestamp */
+            if (meta.timestamp_hashed > DROP_PERCENT){
+                drop(); /* Block 70% of packet if IP Address match in IP Suspect List */
+            }
+        }else if(meta.sl_source == meta.il_read){//???end of this code, make inspection list
+            suspectlist.write(meta.sl_ind,meta.sl_source);
+            key_total.write(meta.hhd_index_total,meta.sl_source);
+            meta.hhd_index_total = meta.hhd_index_total + 1;
+            index_total.write(0,meta.hhd_index_total);
+        } else {
+            if (hdr.ipv4.isValid()) {// ++ alarm packet X 
+                send_frame.apply();
+
+                if (meta.features == 0){ 
+
+                  //######################################################################
+                    //######################################################################
+                    //         ***** FLOW STATISTICS / SUSPECT IDENTIFICATION ******
+                    //######################################################################
+                    //######################################################################
+
+                    meta.hhd_dst_carried = hdr.ipv4.dstAddr;
+                    meta.hhd_src_carried = hdr.ipv4.srcAddr;
+                    meta.hhd_count_carried = 1;
+
+                    hash(meta.hhd_index, HashAlgorithm.crc32, 1w0, {meta.hhd_dst_carried}, 10w1023);//destination hash 
+
+                    // Read key and counter in slot
+                    src_1.read(meta.hhd_src_table,meta.hhd_index);
+                    count_1.read(meta.hhd_count_table,meta.hhd_index);
+
+                    meta.hhd_swapped = 0;
+
+                    if (meta.digest == 0){
+                        if (meta.hhd_count_table == 0){//empty table 
+                            meta.hhd_src_table = meta.hhd_src_carried;
+                            meta.hhd_count_table = meta.hhd_count_carried;
+                            //meta.hhd_swapped = 0;
+
+                        } else{//not empty table, assume same dstip
+                            if (meta.hhd_src_table == meta.hhd_src_carried){//same srcIP in same dstIP index
+                            
+                                meta.hhd_count_table = meta.hhd_count_table + 1;
+                                //meta.hhd_swapped = 0;
+
+                            } else {//diff srcIP in same dstIP index
+                                meta.hhd_src_swap = meta.hhd_src_table;
+                                meta.hhd_count_swap = meta.hhd_count_table;
+
+                                meta.hhd_src_table = meta.hhd_src_carried;
+                                meta.hhd_count_table = meta.hhd_count_carried;
+
+                                meta.hhd_src_carried = meta.hhd_src_swap;
+                                meta.hhd_count_carried = meta.hhd_count_swap;
+
+                                meta.hhd_swapped = 1;
+                            }
+                        }
+
+                        src_1.write(meta.hhd_index,meta.hhd_src_table);
+                        count_1.write(meta.hhd_index,meta.hhd_count_table);
+                    }
+                    else{//meta.digest == 1 
+                        meta.hhd_swapped = 1;
+                        if(meta.hhd_count_table > 5){//suspect list adding threshold is 5, src_table is not empty 
+                            hash(meta.suspectadd_index, HashAlgorithm.crc32, 1w0, {meta.hhd_src_table}, 10w1023);
+                            suspectlist.write(meta.suspectadd_index, meta.hhd_src_table);
+                        }//else just pass to next stage 
+                    }
+        
+
+                    /*Stage 2*/
+                    if (meta.hhd_swapped ==1){
+
+                        hash(meta.hhd_index, HashAlgorithm.crc32_custom , 1w0, {meta.hhd_dst_carried}, 10w1023);
+
+                        // Read key and counter in slot
+                        src_2.read(meta.hhd_src_table,meta.hhd_index);
+                        count_2.read(meta.hhd_count_table,meta.hhd_index);
+
+                        if(meta.digest == 0){
+                            if (meta.hhd_count_table == 0){//empty table, swapped =0 should be here and below too 
+                                meta.hhd_src_table = meta.hhd_src_carried;
+                                meta.hhd_count_table = meta.hhd_count_carried;
+                                meta.hhd_swapped = 0;
+
+                            } else{//not empty table, assume same dstip
+                                if (meta.hhd_src_table == meta.hhd_src_carried){//same srcIP in same dstIP index
+                                    meta.hhd_count_table = meta.hhd_count_table + 1;
+                                    meta.hhd_swapped = 0;
+
+                                } else {//diff srcIP in same dstIP index
+                                    meta.hhd_src_swap = meta.hhd_src_table;
+                                    meta.hhd_count_swap = meta.hhd_count_table;
+
+                                    meta.hhd_src_table = meta.hhd_src_carried;
+                                    meta.hhd_count_table = meta.hhd_count_carried;
+
+                                    meta.hhd_src_carried = meta.hhd_src_swap;
+                                    meta.hhd_count_carried = meta.hhd_count_swap;
+
+                                    meta.hhd_swapped = 1;
+                                }
+                            }
+
+                            src_2.write(meta.hhd_index,meta.hhd_src_table);
+                            count_2.write(meta.hhd_index,meta.hhd_count_table);
+
+                        } 
+                        else {//meta.digest == 1
+                            meta.hhd_swapped = 1;
+                            if(meta.hhd_count_table > 5){//suspect list adding threshold is 5
+                                hash(meta.suspectadd_index, HashAlgorithm.crc32, 1w0, {meta.hhd_src_table}, 10w1023);
+                                suspectlist.write(meta.suspectadd_index,meta.hhd_src_table);
+                            }//else just pass to next stage 
+                        }
+                    }
+
+                    /*Stage 3*/
+                    if (meta.hhd_swapped ==1){
+
+                        hash(meta.hhd_index, HashAlgorithm.crc32_custom, 1w0, {meta.hhd_dst_carried}, 10w1023);
+
+                        // Read key and counter in slot
+                        src_3.read(meta.hhd_src_table,meta.hhd_index);
+                        count_3.read(meta.hhd_count_table,meta.hhd_index);
+
+                        if(meta.digest == 0){
+                            if (meta.hhd_count_table == 0){//empty table, swapped =0 should be here and below too 
+                                meta.hhd_src_table = meta.hhd_src_carried;
+                                meta.hhd_count_table = meta.hhd_count_carried;
+                                meta.hhd_swapped = 0;
+
+                            } else{//not empty table, assume same dstip
+                                if (meta.hhd_src_table == meta.hhd_src_carried){//same srcIP in same dstIP index
+                                    meta.hhd_count_table = meta.hhd_count_table + 1;
+                                    meta.hhd_swapped = 0;
+
+                                } else {//diff srcIP in same dstIP index
+                                    meta.hhd_src_swap = meta.hhd_src_table;
+                                    meta.hhd_count_swap = meta.hhd_count_table;
+
+                                    meta.hhd_src_table = meta.hhd_src_carried;
+                                    meta.hhd_count_table = meta.hhd_count_carried;
+
+                                    meta.hhd_src_carried = meta.hhd_src_swap;
+                                    meta.hhd_count_carried = meta.hhd_count_swap;
+
+                                    meta.hhd_swapped = 1;
+                                }
+                            }
+
+                            src_3.write(meta.hhd_index,meta.hhd_src_table);
+                            count_3.write(meta.hhd_index,meta.hhd_count_table);
+
+                        } 
+                        else {//meta.digest == 1
+                            meta.hhd_swapped = 1;
+                            if(meta.hhd_count_table > 5){//suspect list adding threshold is 5
+                                hash(meta.suspectadd_index, HashAlgorithm.crc32, 1w0, {meta.hhd_src_table}, 10w1023);
+                                suspectlist.write(meta.suspectadd_index,meta.hhd_src_table);
+                            }//else just pass to next stage 
+                        }
+                    }
+                    index_total.write(0,meta.hhd_index_total);
+                }//features == 0 end 
+            }//not alarm packet end 
+            // else if (hdr.ipv4.isValid() && meta.alarm_pktin == 1){ddosd header} alarm packet O 
+        }
     }
 }
 
