@@ -1105,7 +1105,7 @@ control MyEgress(inout headers hdr,inout metadata meta,inout standard_metadata_t
                     //       ***** END FLOW STATISTICS / SUSPECT IDENTIFICATION ******
                     //######################################################################
                     //######################################################################
-
+                //features == 0 end 
                 } else if (standard_metadata.instance_type == CLONE) {
                     meta.key_write_ip = meta.key - 1;
                     write_ip.apply();
@@ -1157,7 +1157,8 @@ control MyEgress(inout headers hdr,inout metadata meta,inout standard_metadata_t
                         }
                     }
                 }
-            } else if (hdr.ipv4.isValid() && meta.alarm_pktin == 1){
+            }//not alarm packet end 
+             else if (hdr.ipv4.isValid() && meta.alarm_pktin == 1){
                 //Adding IP address received into inspection list
                 if (hdr.ddosd.isValid()){
                     if (hdr.ipv4.protocol == 0xFD && hdr.ddosd.count_ip != 0){
