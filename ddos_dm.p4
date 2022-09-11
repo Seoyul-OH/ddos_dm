@@ -14,7 +14,10 @@
 const bit<32> NORMAL = 0;
 const bit<32> CLONE = 2; // PKT_INSTANCE_TYPE_EGRESS_CLONE 2
 const bit<32> RECIRCULATED = 4; //PKT_INSTANCE_TYPE_INGRESS_RECIRC 4
-const bit<32> RESUBMIT = 6; //PKT_INSTANCE_TYPE_RESUBMIT 6
+
+const bit<8> CLONE_FL_1 = 1;
+const bit<8> RECIRC_FL_1 = 3;
+
 
 
 typedef bit<9>  egressSpec_t;
@@ -55,18 +58,16 @@ header alarm_t {
 
 
 struct metadata {
+    @field_list(CLONE_FL_1, RECIRC_FL_1)
     bit<1> res1; 
     bit<1> res2; 
     bit<1> res3;
     bit<32> count_min;
-
     bit<32> packet_number;
     bit<32> current_round;
-
     bit<32> round_in_cms1;
     bit<32> round_in_cms2;
     bit<32> round_in_cms3;
-
     bit<32> sl_source;/* IP source address to verify in Suspect List*/
     bit<32> sl_dst;
     bit<32> sl_ind; /* Suspect List index when read*/
@@ -74,53 +75,38 @@ struct metadata {
     bit<32> il_read; /* IP address readed from Inspection List*/
     bit<32> sl_address; /* Address to include into Suspect List */
     bit<32> sl_index; /* Suspect List index when write*/
-
     bit<48> timestamp; /* Ingress timestamp to generate hash and filtering malicious traffic */
     bit<48> timestamp_hashed; /* Hash of timestamp for filtering */
-    
     bit<32> hhd_dst_carried; /* Key packet */
     bit<32> hhd_src_carried; /* Key packet */
     bit<32> hhd_count_carried; /* Counter for packet key */
     bit<32> hhd_index; /* Table slot based on hash function */
-
     bit<32> hhd_src_table; /* IP address in table */
     bit<32> hhd_count_table; /* Counter value in table */
-
     bit<32> hhd_src_swap; /* Swap key carried and key in table */
     bit<32> hhd_count_swap; /* Swap counter carried and table */
-
     bit<32> hhd_swapped; /* Indicator if IP was swapped in previous stage */
-    //bit<32> hhd_thresh; /* Heavy Hitter Threshold */
-
     bit<32> hhd_index_total; /* Position of Heavy Hitter global register */
     bit<32> hhd_aux_index_total; /* Position of Heavy Hitter global register when alarm detected */
     bit<32> hhd_write_key; /* Key readed from Heavy Hitter global register for write in alarm packet */
- 
     bit<32> vl_ind; 
     bit<32> vl_read; 
-
     bit<16> parser_count; /* Number of headers to parser */
     bit<16> parser_remaining; /* Number of packet remaining for parser */
     int<32> ip_count; /* Number of ip address into alarm packet */
-
     bit<8> alarm; /* It is set to 0x01 to indicate the detection of a DDoS attack */
     bit<9> egress_port; /* Recirculated packet egrees port */
     bit<1> recirculated; /* Value to know in egress if packet from ingress is recirculated originally */
-    
     bit<9> ack_port; /* Port wich switch is circulating ack responses, for non register as heavy hitter */
     bit<9> ingress_port; /* Port on which the packet arrived */
     bit<16> sl_position; /* Header stack position to read ip address in alarm packet */
     bit<32> trigsl; /* Trigger when alarm packet with ip addresses is received */
-
     bit<8> features; /* Indicates switch features */
     bit<8> attack; /* Network device status 0:Only Forwarding, 1:Mechanism running, 2:Mechanism running and k halved */
-
     bit<1> digest;
     bit<32> victimdstip;
-
     bit<32> alarm_pktin; /* Alarm packet received */
     bit<32> alarm_pktout; /* Alarm packet generated into switch */
-
     bit<8> key; /* Key for share alarm packet - session ID */
     bit<8> key_write_ip;
     bit<8> key_write_ip_notif;
@@ -231,10 +217,8 @@ control ingress(inout headers hdr, inout metadata meta, inout standard_metadata_
         actions = {
             ipv4_forward;
             drop;
-            NoAction;
         }
         size = 1024;
-        default_action = drop();
     }
     
 
@@ -615,9 +599,6 @@ control ingress(inout headers hdr, inout metadata meta, inout standard_metadata_
                     //recirculate packet or something.. 
                 }
             }    
-            else {
-                drop();
-            }
         }
         else if (standard_metadata.instance_type == RECIRCULATED && meta.alarm_pktout == 1){
             standard_metadata.egress_spec = meta.egress_port;
@@ -715,7 +696,7 @@ control egress(inout headers hdr, inout metadata meta, inout standard_metadata_t
         if (meta.alarm == 1){
             meta.key = meta.key + 1;
             if (meta.mirror_session_id > 0) {
-                clone3(CloneType.E2E, (bit<32>) meta.mirror_session_id, { meta });
+                clone_preserving_field_list(CloneType.E2E, (bit<32>) meta.mirror_session_id, CLONE_FL_1);
             }
         }else{
             index_total.write(0,0);
@@ -899,11 +880,11 @@ control egress(inout headers hdr, inout metadata meta, inout standard_metadata_t
                         index_total.read(meta.hhd_aux_index_total,0);
                         index_total.write(0,0);
                         meta.alarm_pktout = 1;
-                        recirculate(meta);
+                        recirculate_preserving_field_list(RECIRC_FL_1);
                     } else {
                         meta.key = meta.key + 1;
                         if (meta.mirror_session_id > 0) {
-                            clone3(CloneType.E2E, (bit<32>) meta.mirror_session_id, { meta });
+                            clone_preserving_field_list(CloneType.E2E, (bit<32>) meta.mirror_session_id, CLONE_FL_1);
                         }
                     }
                 } else if (meta.recirculated == 1 && meta.alarm_pktout == 1){
@@ -919,11 +900,11 @@ control egress(inout headers hdr, inout metadata meta, inout standard_metadata_t
                             hdr.ipv4.totalLen = hdr.ipv4.totalLen + 4;
                             meta.egress_port = standard_metadata.egress_port;
                         }
-                        recirculate(meta);
+                        recirculate_preserving_field_list(RECIRC_FL_1);
                     } else {
                         meta.key = meta.key + 1;
                         if (meta.mirror_session_id > 0) {
-                            clone3(CloneType.E2E, (bit<32>) meta.mirror_session_id, { meta });
+                            clone_preserving_field_list(CloneType.E2E, (bit<32>) meta.mirror_session_id, CLONE_FL_1);
                         }
                     }
                 }
@@ -936,7 +917,7 @@ control egress(inout headers hdr, inout metadata meta, inout standard_metadata_t
                         inspectionlist.write(meta.sl_index, meta.sl_address);
                         hdr.ddosdm.count_ip = hdr.ddosdm.count_ip - 1;
                         hdr.alarm.pop_front(1);
-                        recirculate(meta);
+                        recirculate_preserving_field_list(RECIRC_FL_1);
                     }
                 }
             }
